@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Only in the main project: forks just run the sync workflow.
+    if: github.repository == 'cecobask/imdb-wetrakr-sync'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Test
+        # The runner image ships Google Chrome, so the chromedp tests run too.
+        run: go test -race -tags browser ./...
+      - name: Build
+        run: make build
+
+  lint:
+    # Only in the main project: forks just run the sync workflow.
+    if: github.repository == 'cecobask/imdb-wetrakr-sync'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+
+  docker:
+    # Only in the main project: forks just run the sync workflow.
+    if: github.repository == 'cecobask/imdb-wetrakr-sync'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false

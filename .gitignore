@@ -1,0 +1,6 @@
+/build/
+/exports/
+config.yaml
+.env
+*-token.json
+.wetrakr-token-*.json

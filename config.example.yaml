@@ -1,0 +1,41 @@
+# Copy to config.yaml and fill in. Every key can also be set with an environment variable named IWS_<SECTION>_<KEY>,
+# for example IWS_IMDB_COOKIEATMAIN. Environment variables override the file. List values take comma-separated ids.
+LOG:
+  # debug, info, warn or error. debug includes every message between the sync and the browser.
+  LEVEL: info
+  # text or json.
+  FORMAT: text
+IMDB:
+  # Value of the at-main cookie of a signed-in imdb.com session.
+  COOKIEATMAIN: <at-main>
+  # Lists to sync. Leave empty to sync every list on your profile.
+  LISTS: []
+  # Lists to leave out.
+  IGNOREDLISTS: []
+  # Run Chrome without a window. Set to false to watch what the browser does.
+  HEADLESS: true
+  # Path to Chrome or Chromium. Leave empty to use the one installed on the system.
+  BROWSERPATH: ""
+  # Read the IMDb CSV exports from this directory instead of downloading them. No cookie or browser is needed then.
+  EXPORTDIR: ""
+WETRAKR:
+  # Credentials of your app from https://wetrakr.com/profile/settings/api
+  CLIENTID: <client-id>
+  CLIENTSECRET: <client-secret>
+  # Your WeTrakr username. When set, a token of any other account is refused. Optional here, required in GitHub Actions.
+  USERNAME: ""
+  # Where `iws auth` saves the tokens. The sync refreshes and rewrites it.
+  TOKENFILE: wetrakr-token.json
+  # Privacy of the lists the sync creates: public, friends or private.
+  LISTPRIVACY: private
+SYNC:
+  # dry-run: only log the changes. add-only: never remove. full: WeTrakr mirrors IMDb.
+  MODE: dry-run
+  WATCHLIST: true
+  LISTS: true
+  RATINGS: true
+  # Mark rated movies and episodes as watched on the date they were rated.
+  HISTORY: false
+  # Limit for the whole run. IMDb exports can take minutes for large libraries; the sync waits for them until a
+  # quarter of this limit (2 to 5 minutes) is left for the WeTrakr side, then continues without the unfinished ones.
+  TIMEOUT: 30m

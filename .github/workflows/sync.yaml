@@ -1,0 +1,80 @@
+name: sync
+
+on:
+  schedule:
+  - cron: "0 */12 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "What to do: dry-run = preview only, add-only = add but never remove, full = make WeTrakr match IMDb. default = use your SYNC_MODE setting (dry-run if you haven't set one)."
+        type: choice
+        options: [ default, dry-run, add-only, full ]
+        default: default
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      IWS_IMDB_COOKIEATMAIN: ${{ secrets.IMDB_COOKIEATMAIN }}
+      IWS_IMDB_LISTS: ${{ vars.IMDB_LISTS }}
+      IWS_IMDB_IGNOREDLISTS: ${{ vars.IMDB_IGNOREDLISTS }}
+      IWS_LOG_LEVEL: ${{ vars.LOG_LEVEL }}
+      IWS_WETRAKR_CLIENTID: ${{ secrets.WETRAKR_CLIENTID }}
+      IWS_WETRAKR_CLIENTSECRET: ${{ secrets.WETRAKR_CLIENTSECRET }}
+      IWS_WETRAKR_USERNAME: ${{ vars.WETRAKR_USERNAME }}
+      IWS_WETRAKR_LISTPRIVACY: ${{ vars.WETRAKR_LISTPRIVACY }}
+      IWS_WETRAKR_TOKENFILE: wetrakr-token.json
+      IWS_SYNC_MODE: ${{ inputs.mode != 'default' && inputs.mode || vars.SYNC_MODE }}
+      IWS_SYNC_WATCHLIST: ${{ vars.SYNC_WATCHLIST }}
+      IWS_SYNC_LISTS: ${{ vars.SYNC_LISTS }}
+      IWS_SYNC_RATINGS: ${{ vars.SYNC_RATINGS }}
+      IWS_SYNC_HISTORY: ${{ vars.SYNC_HISTORY }}
+      IWS_SYNC_TIMEOUT: ${{ vars.SYNC_TIMEOUT }}
+      GH_TOKEN: ${{ secrets.GH_PAT }}
+    steps:
+    - name: Check that the WeTrakr token can be saved
+      # The token is kept in the WETRAKR_TOKEN secret, which only GH_PAT can write. Check it before asking for an
+      # authorization that could not be saved. iws validates its own settings.
+      run: |
+        if [ -z "$GH_TOKEN" ] || ! gh secret list --repo "$GITHUB_REPOSITORY" > /dev/null; then
+          echo "::error::The GH_PAT secret is missing or can't access the secrets of $GITHUB_REPOSITORY: it needs read and write access to Secrets for this repository"
+          exit 1
+        fi
+    - uses: actions/checkout@v5
+    - uses: actions/setup-go@v6
+      with:
+        go-version-file: go.mod
+    - name: Build
+      run: make build
+    - name: Restore the WeTrakr token
+      env:
+        WETRAKR_TOKEN: ${{ secrets.WETRAKR_TOKEN }}
+      run: |
+        umask 077
+        if [ -n "$WETRAKR_TOKEN" ]; then
+          printf '%s' "$WETRAKR_TOKEN" > wetrakr-token.json
+          sha256sum wetrakr-token.json > wetrakr-token.json.sha256
+        else
+          echo "No WeTrakr token saved yet: the next step asks for authorization."
+        fi
+    - name: Authorize WeTrakr
+      # Keeps a working token. Without one, it logs a code to enter at wetrakr.com/activate and waits for approval
+      # until the code expires.
+      timeout-minutes: 15
+      run: ./build/iws auth --if-needed
+    - name: Sync
+      # The runner image ships Google Chrome, which chromedp finds on its own.
+      run: ./build/iws sync
+    - name: Save the WeTrakr token
+      # Saves a new authorization or a refreshed token (refresh tokens rotate). always() runs it even when an earlier
+      # step fails or the run is cancelled, and the script skips the save when the token did not change.
+      if: always()
+      run: bash .github/scripts/save-token.sh
