@@ -1,0 +1,33 @@
+version: 2
+before:
+  hooks:
+    - go mod tidy
+builds:
+  - binary: iws
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/cecobask/imdb-wetrakr-sync/cmd.Version={{ .Version }}
+    goos:
+      - linux
+      - windows
+      - darwin
+archives:
+  - formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - config.example.yaml
+      - docs/advanced.md
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

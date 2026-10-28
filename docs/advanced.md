@@ -9,10 +9,12 @@ This page is for people comfortable with a terminal. To run the sync on GitHub w
 - [How the sync works](#how-the-sync-works)
 - [GitHub Actions internals](#github-actions-internals)
 - [Development](#development)
+- [Releasing](#releasing)
 
 ## Command line
 
-You need [Go](https://go.dev/dl/) 1.27 or later and Chrome or Chromium.
+You need Chrome or Chromium, and `iws` itself: download it for your system from the
+[releases page](https://github.com/cecobask/imdb-wetrakr-sync/releases), or build it with [Go](https://go.dev/dl):
 
 ```sh
 make build
@@ -123,3 +125,18 @@ make test          # unit tests
 make test-browser  # also the chromedp tests (needs Chrome)
 make lint          # needs golangci-lint
 ```
+
+## Releasing
+
+Pushing a `v*` tag runs [`release.yaml`](../.github/workflows/release.yaml), where
+[GoReleaser](https://goreleaser.com) builds `iws` for Linux, macOS and Windows and publishes the archives with a
+changelog as a GitHub release. [`package.yaml`](../.github/workflows/package.yaml) pushes the image with the same version
+tags. Versions start at major 0 while the project is young, so the first release is `v0.1.0`.
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Commits starting with `docs:` or `test:` are left out of the changelog. `goreleaser release --snapshot --clean` builds
+the release archives locally in `dist`, without publishing anything.
