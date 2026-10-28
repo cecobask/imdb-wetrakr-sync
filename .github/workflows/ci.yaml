@@ -19,7 +19,10 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Test
-        # The runner image ships Google Chrome, so the chromedp tests run too.
+        # Google Chrome from the runner image, not the Chromium snapshot that chromedp finds first: Ubuntu's AppArmor
+        # only lets Chrome's sandbox start from Chrome's official install path.
+        env:
+          IWS_IMDB_BROWSERPATH: /usr/bin/google-chrome
         run: go test -race -tags browser ./...
       - name: Build
         run: make build

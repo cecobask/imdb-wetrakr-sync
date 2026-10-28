@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -20,8 +21,13 @@ func newTestSession(t *testing.T) (*browserSession, context.Context) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	t.Cleanup(cancel)
-	s, err := startBrowser(ctx, browserConfig{headless: true}, discard)
+	// CI names the browser, so a broken one fails there instead of skipping the tests.
+	path := os.Getenv("IWS_IMDB_BROWSERPATH")
+	s, err := startBrowser(ctx, browserConfig{headless: true, browserPath: path}, discard)
 	if err != nil {
+		if path != "" {
+			t.Fatalf("failure starting %s: %v", path, err)
+		}
 		t.Skipf("no usable Chrome: %v", err)
 	}
 	t.Cleanup(s.close)

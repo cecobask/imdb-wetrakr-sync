@@ -32,6 +32,9 @@ jobs:
       IWS_WETRAKR_USERNAME: ${{ vars.WETRAKR_USERNAME }}
       IWS_WETRAKR_LISTPRIVACY: ${{ vars.WETRAKR_LISTPRIVACY }}
       IWS_WETRAKR_TOKENFILE: wetrakr-token.json
+      # Google Chrome, not the Chromium snapshot that chromedp finds first: Ubuntu's AppArmor only lets Chrome's
+      # sandbox start from Chrome's official install path.
+      IWS_IMDB_BROWSERPATH: /usr/bin/google-chrome
       IWS_SYNC_MODE: ${{ inputs.mode != 'default' && inputs.mode || vars.SYNC_MODE }}
       IWS_SYNC_WATCHLIST: ${{ vars.SYNC_WATCHLIST }}
       IWS_SYNC_LISTS: ${{ vars.SYNC_LISTS }}
@@ -71,7 +74,6 @@ jobs:
       timeout-minutes: 15
       run: ./build/iws auth --if-needed
     - name: Sync
-      # The runner image ships Google Chrome, which chromedp finds on its own.
       run: ./build/iws sync
     - name: Save the WeTrakr token
       # Saves a new authorization or a refreshed token (refresh tokens rotate). always() runs it even when an earlier
