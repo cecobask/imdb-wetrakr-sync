@@ -94,8 +94,8 @@ docker run --rm --env-file .env -v "$PWD/data:/data" iws:dev sync
 - **IMDb.** IMDb has no public API. `iws` opens imdb.com in a headless Chrome driven by
   [chromedp](https://github.com/chromedp/chromedp), signs in with your `at-main` cookie, solves the AWS WAF challenge,
   requests the CSV exports of the watchlist, the lists and the ratings, waits on the exports page until they are ready,
-  and downloads them. Before requesting exports it counts the existing ones, so an older export is never mistaken for
-  the new one.
+  and downloads them. It notes IMDb's time before requesting exports and only takes exports that started after it, so
+  an older export is never mistaken for the new one.
 - **WeTrakr.** It reads the current state with compact pages of up to 5,000 rows, compares by IMDb id, and writes the
   differences in batches of 1,000 items. Rate limits are retried with the delay the API asks for. Writes carry an
   idempotency key, so a retried write is applied once. A daily quota error stops the run.

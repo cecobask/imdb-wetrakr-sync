@@ -99,3 +99,56 @@ func TestBrowserHelpers(t *testing.T) {
 		t.Errorf("cookie not set: %+v", cookies.Cookies)
 	}
 }
+
+func TestParseExportsPage(t *testing.T) {
+	// The page data as the exports page has it, trimmed to the fields the client reads.
+	const nextData = `{"props":{"pageProps":{
+		"requestContext":{"timestamp":"2026-10-29T21:29:25.919Z"},
+		"mainColumnData":{"getExports":{"total":2,"edges":[
+			{"node":{"startedOn":"2026-10-29T17:48:26.486Z","status":{"id":"PROCESSING"},"exportType":"LIST",
+				"listExportMetadata":{"id":"ls024163529","listClassId":"WATCH_LIST","name":"WATCHLIST"}}},
+			{"node":{"startedOn":"2026-10-29T17:47:17.120Z","status":{"id":"READY"},"exportType":"RATINGS"}}
+		]}}
+	}}}`
+	pages := map[string]string{
+		"/exports": `<script id="__NEXT_DATA__" type="application/json">` + nextData + `</script>`,
+		"/broken":  `<script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{}}}</script>`,
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<html><body>" + pages[r.URL.Path] + "</body></html>"))
+	}))
+	defer srv.Close()
+
+	s, ctx := newTestSession(t)
+	if err := s.navigate(ctx, srv.URL+"/exports"); err != nil {
+		t.Fatal(err)
+	}
+	page, err := parseExportsPage(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &exportsPage{
+		Timestamp: time.Date(2026, 10, 29, 21, 29, 25, 919000000, time.UTC),
+		Rows: []exportRow{
+			{Index: 0, Type: "LIST", ListID: "ls024163529", Name: "WATCHLIST", Status: "PROCESSING", StartedOn: time.Date(2026, 10, 29, 17, 48, 26, 486000000, time.UTC)},
+			{Index: 1, Type: "RATINGS", Status: "READY", StartedOn: time.Date(2026, 10, 29, 17, 47, 17, 120000000, time.UTC)},
+		},
+	}
+	if !page.Timestamp.Equal(want.Timestamp) || len(page.Rows) != len(want.Rows) {
+		t.Fatalf("page: got %+v, want %+v", page, want)
+	}
+	for i, row := range page.Rows {
+		w := want.Rows[i]
+		if row.Index != w.Index || row.Type != w.Type || row.ListID != w.ListID || row.Name != w.Name || row.Status != w.Status || !row.StartedOn.Equal(w.StartedOn) {
+			t.Errorf("row %d: got %+v, want %+v", i, row, w)
+		}
+	}
+
+	if err := s.navigate(ctx, srv.URL+"/broken"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseExportsPage(ctx, s); err == nil {
+		t.Error("broken page: no error")
+	}
+}

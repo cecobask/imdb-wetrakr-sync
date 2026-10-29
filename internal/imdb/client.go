@@ -86,10 +86,7 @@ type resource struct {
 	id      string // the list id; empty for the ratings
 	name    string // the list name, when known
 	pageURL string
-	// before is the number of rows of this resource on the exports page before the export started. A fresh export
-	// adds a row, so a higher count means the newest row is the one this run requested.
-	before int
-	data   []byte
+	data    []byte
 }
 
 func (r *resource) String() string {
@@ -112,6 +109,14 @@ func (r *resource) logAttrs(extra ...any) []any {
 		attrs = append(attrs, "id", r.id)
 	}
 	return append(attrs, extra...)
+}
+
+// exportOf reports whether an export on the exports page is an export of the resource.
+func (r *resource) exportOf(row exportRow) bool {
+	if r.kind == "ratings" {
+		return row.Type == "RATINGS"
+	}
+	return row.Type == "LIST" && row.ListID == r.id
 }
 
 // matches reports whether a link on the exports page points to the resource. Ratings rows link to
@@ -185,7 +190,8 @@ func (b *BrowserSource) Fetch(ctx context.Context, req Request) (*Data, error) {
 		return b.parse(req, nil)
 	}
 
-	if err := b.countExistingExports(ctx, resources); err != nil {
+	since, err := b.exportsStartTime(ctx)
+	if err != nil {
 		return nil, err
 	}
 	var exported []*resource
@@ -198,7 +204,7 @@ func (b *BrowserSource) Fetch(ctx context.Context, req Request) (*Data, error) {
 			exported = append(exported, r)
 		}
 	}
-	if err := b.downloadExports(ctx, exported); err != nil {
+	if err := b.downloadExports(ctx, exported, since); err != nil {
 		return nil, err
 	}
 	return b.parse(req, exported)
@@ -455,56 +461,82 @@ func (b *BrowserSource) clickExportMenuItem(ctx context.Context) error {
 	return errors.New("the actions menu has no Export item")
 }
 
+// exportRow is one export on the exports page.
 type exportRow struct {
-	Index      int    `json:"index"`
-	Href       string `json:"href"`
-	Name       string `json:"name"`
-	Processing bool   `json:"processing"`
-	Ready      bool   `json:"ready"`
+	Index     int       `json:"index"`
+	Type      string    `json:"type"` // LIST, for the watchlist too, or RATINGS
+	ListID    string    `json:"listId"`
+	Name      string    `json:"name"`
+	Status    string    `json:"status"` // READY once it can be downloaded
+	StartedOn time.Time `json:"startedOn"`
 }
 
-// exportRows reads the rows of the exports page, newest first. The status button carries a READY or PROCESSING class.
-func (b *BrowserSource) exportRows(ctx context.Context) ([]exportRow, error) {
-	return eval[[]exportRow](ctx, b.session, fmt.Sprintf(`[...document.querySelectorAll(%s)].map((li, index) => {
-		const link = li.querySelector(%s) || li.querySelector("a[href]");
-		const status = li.querySelector(%s);
-		const classes = status ? status.className : "";
-		const text = ((status && status.textContent) || "").trim().toLowerCase();
-		return {
-			index,
-			href: link ? link.getAttribute("href") : "",
-			name: link ? link.textContent.trim() : "",
-			processing: /\bPROCESSING\b/.test(classes) || text.includes("processing"),
-			ready: !!status && status.tagName === "BUTTON" && !status.disabled && (/\bREADY\b/.test(classes) || text === "ready"),
-		};
-	})`, jsString(selectorExportRow), jsString(selectorListHyperlink), jsString(selectorExportStatusButton)))
+func (row exportRow) ready() bool {
+	return row.Status == "READY"
 }
 
-func (b *BrowserSource) loadExportRows(ctx context.Context) ([]exportRow, error) {
+type exportsPage struct {
+	// Timestamp is the time of the IMDb server when it rendered the page, so it compares with the start times of the
+	// exports without depending on the local clock.
+	Timestamp time.Time   `json:"timestamp"`
+	Rows      []exportRow `json:"rows"`
+}
+
+// readExportsPage reads the exports from the data the exports page is rendered from, newest first, in the order of
+// the rendered rows. The rendered rows carry no start time, so a new export looks just like one from an earlier run,
+// and the page shows only the newest 50 until it is scrolled. The data has the start times and the newest 50 exports,
+// which hold the exports of a run unless it has more than 50 resources.
+func (b *BrowserSource) readExportsPage(ctx context.Context) (*exportsPage, error) {
 	if err := b.open(ctx, baseURL+pathExports); err != nil {
 		return nil, err
 	}
 	if _, err := b.session.waitAny(ctx, pageTimeout, selectorExportRow, "footer"); err != nil {
 		return nil, err
 	}
-	rows, err := b.exportRows(ctx)
+	return parseExportsPage(ctx, b.session)
+}
+
+func parseExportsPage(ctx context.Context, s *browserSession) (*exportsPage, error) {
+	page, err := eval[*exportsPage](ctx, s, `(() => {
+		let props = {};
+		try {
+			props = JSON.parse(document.querySelector("#__NEXT_DATA__").textContent).props.pageProps || {};
+		} catch (e) {}
+		const exports = (props.mainColumnData || {}).getExports;
+		if (!exports) return null;
+		return {
+			timestamp: (props.requestContext || {}).timestamp || null,
+			rows: (exports.edges || []).map((edge, index) => {
+				const node = edge.node || {};
+				const list = node.listExportMetadata || {};
+				return {
+					index,
+					type: node.exportType || "",
+					listId: list.id || "",
+					name: list.name || "",
+					status: (node.status || {}).id || "",
+					startedOn: node.startedOn || null,
+				};
+			}),
+		};
+	})()`)
 	if err != nil {
 		return nil, fmt.Errorf("failure reading the IMDb exports page: %w", err)
 	}
-	return rows, nil
+	if page == nil || page.Timestamp.IsZero() {
+		return nil, errors.New("failure reading the IMDb exports page: the page layout probably changed")
+	}
+	return page, nil
 }
 
-// countExistingExports records how many exports of each resource the exports page lists before this run starts new
-// ones, so older exports are never mistaken for the new ones.
-func (b *BrowserSource) countExistingExports(ctx context.Context, resources []*resource) error {
-	rows, err := b.loadExportRows(ctx)
+// exportsStartTime returns the IMDb server time before this run starts new exports, so older exports are never
+// mistaken for the new ones.
+func (b *BrowserSource) exportsStartTime(ctx context.Context) (time.Time, error) {
+	page, err := b.readExportsPage(ctx)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
-	for _, r := range resources {
-		r.before = len(matchingRows(rows, r))
-	}
-	return nil
+	return page.Timestamp, nil
 }
 
 // exportState is the state of the export this run requested for a resource.
@@ -516,26 +548,24 @@ const (
 	exportReady
 )
 
-func stateOf(rows []exportRow, r *resource) (exportState, exportRow) {
-	matching := matchingRows(rows, r)
-	if len(matching) <= r.before {
-		return exportNotListed, exportRow{}
-	}
-	newest := matching[0]
-	if newest.Ready && !newest.Processing {
-		return exportReady, newest
-	}
-	return exportProcessing, newest
-}
-
-func matchingRows(rows []exportRow, r *resource) []exportRow {
-	var out []exportRow
+// stateOf returns the state of the export this run requested for the resource, which started at or after since, and
+// the newest export of the resource, which is an earlier one when the new one is not listed yet.
+func stateOf(rows []exportRow, r *resource, since time.Time) (exportState, exportRow) {
+	var newest exportRow
+	found := false
 	for _, row := range rows {
-		if r.matches(row.Href) {
-			out = append(out, row)
+		if r.exportOf(row) && (!found || row.StartedOn.After(newest.StartedOn)) {
+			newest, found = row, true
 		}
 	}
-	return out
+	switch {
+	case !found || newest.StartedOn.Before(since):
+		return exportNotListed, newest
+	case newest.ready():
+		return exportReady, newest
+	default:
+		return exportProcessing, newest
+	}
 }
 
 // waitBudget returns until when to wait for the exports. Large exports, such as thousands of ratings, can take many
@@ -550,7 +580,7 @@ func waitBudget(ctx context.Context, now time.Time) time.Time {
 }
 
 // downloadExports polls the exports page until every export this run requested is ready, then downloads them.
-func (b *BrowserSource) downloadExports(ctx context.Context, resources []*resource) error {
+func (b *BrowserSource) downloadExports(ctx context.Context, resources []*resource, since time.Time) error {
 	if len(resources) == 0 {
 		return nil
 	}
@@ -558,14 +588,15 @@ func (b *BrowserSource) downloadExports(ctx context.Context, resources []*resour
 	interval := pollMinInterval
 	var rows []exportRow
 	for {
-		var err error
-		if rows, err = b.loadExportRows(ctx); err != nil {
+		page, err := b.readExportsPage(ctx)
+		if err != nil {
 			return err
 		}
+		rows = page.Rows
 		var waiting []string
 		processing, notListed := 0, 0
 		for _, r := range resources {
-			switch state, _ := stateOf(rows, r); state {
+			switch state, _ := stateOf(rows, r, since); state {
 			case exportNotListed:
 				notListed++
 				waiting = append(waiting, r.String())
@@ -589,30 +620,30 @@ func (b *BrowserSource) downloadExports(ctx context.Context, resources []*resour
 	}
 
 	for _, r := range resources {
-		state, row := stateOf(rows, r)
+		state, row := stateOf(rows, r, since)
 		if state != exportReady {
 			// Fall back to the newest earlier export when the new one never showed up, rather than skipping the data.
-			matching := matchingRows(rows, r)
-			if len(matching) == 0 || !matching[0].Ready || matching[0].Processing || state == exportProcessing {
+			if state == exportProcessing || !row.ready() {
 				b.logger.Warn("IMDb export is not ready, skipping it", r.logAttrs()...)
 				continue
 			}
-			row = matching[0]
 			b.logger.Warn("the new IMDb export never appeared, using the newest earlier export instead", r.logAttrs()...)
 		}
 		if r.kind == "list" && r.name == "" {
 			r.name = row.Name
 		}
+		// Mark the download button of the rendered row of the export, and check that the row is the resource's.
 		mark := fmt.Sprintf(`(() => {
 			document.querySelectorAll("[%[1]s]").forEach(e => e.removeAttribute("%[1]s"));
 			const li = document.querySelectorAll(%[2]s)[%[3]d];
 			const button = li && li.querySelector(%[4]s);
-			if (!button) return false;
+			if (!button) return "";
 			button.setAttribute("%[1]s", "1");
-			return true;
-		})()`, attrDownloadTarget, jsString(selectorExportRow), row.Index, jsString(selectorExportStatusButton))
-		if ok, err := eval[bool](ctx, b.session, mark); err != nil || !ok {
-			return fmt.Errorf("failure finding the download button of the %s: %v", r, err)
+			const link = li.querySelector(%[5]s) || li.querySelector("a[href]");
+			return link ? link.getAttribute("href") : "";
+		})()`, attrDownloadTarget, jsString(selectorExportRow), row.Index, jsString(selectorExportStatusButton), jsString(selectorListHyperlink))
+		if href, err := eval[string](ctx, b.session, mark); err != nil || !r.matches(href) {
+			return fmt.Errorf("failure finding the download button of the %s (row %d links to %q): %v", r, row.Index, href, err)
 		}
 		b.logger.Info("downloading IMDb export", r.logAttrs()...)
 		data, err := b.session.download(ctx, fmt.Sprintf("[%s='1']", attrDownloadTarget), downloadTimeout)

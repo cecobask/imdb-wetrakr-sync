@@ -4,19 +4,49 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
 
-// Rows as the exports page lists them, newest first (taken from a real page).
-var pageRows = []exportRow{
-	{Index: 0, Href: "/list/ls024163529/?ref_=exp_t_1", Name: "cecobask's Watchlist", Ready: true},
-	{Index: 1, Href: "/list/ls4154799008/?ref_=exp_t_2", Name: "watched-2026", Ready: true},
-	{Index: 2, Href: "/user/p.bngbdelewbg5xo6675jsuzfuvi/ratings/?ref_=exp_t_3", Name: "Your ratings", Ready: true},
-	{Index: 3, Href: "/list/ls024163529/?ref_=exp_t_4", Name: "cecobask's Watchlist", Ready: true},
-	{Index: 4, Href: "/list/ls4154799008/?ref_=exp_t_5", Name: "watched-2026", Ready: true},
-	{Index: 5, Href: "/user/p.bngbdelewbg5xo6675jsuzfuvi/ratings/?ref_=exp_t_6", Name: "Your ratings", Ready: true},
+// Exports as the exports page data lists them, newest first, after two runs that exported the same resources (taken
+// from a real page).
+var (
+	run1     = time.Date(2026, 10, 29, 5, 47, 0, 0, time.UTC)
+	run2     = run1.Add(12 * time.Hour)
+	pageRows = []exportRow{
+		{Index: 0, Type: "LIST", ListID: "ls024163529", Name: "WATCHLIST", Status: "READY", StartedOn: run2.Add(70 * time.Second)},
+		{Index: 1, Type: "LIST", ListID: "ls4154799008", Name: "watched-2026", Status: "READY", StartedOn: run2.Add(40 * time.Second)},
+		{Index: 2, Type: "RATINGS", Status: "READY", StartedOn: run2.Add(17 * time.Second)},
+		{Index: 3, Type: "LIST", ListID: "ls024163529", Name: "WATCHLIST", Status: "READY", StartedOn: run1.Add(70 * time.Second)},
+		{Index: 4, Type: "LIST", ListID: "ls4154799008", Name: "watched-2026", Status: "READY", StartedOn: run1.Add(40 * time.Second)},
+		{Index: 5, Type: "RATINGS", Status: "READY", StartedOn: run1.Add(17 * time.Second)},
+	}
+)
+
+func TestResourceExportOf(t *testing.T) {
+	ratings := &resource{kind: "ratings"}
+	list := &resource{kind: "list", id: "ls4154799008"}
+	watchlist := &resource{kind: "watchlist", id: "ls024163529"}
+	tests := []struct {
+		r    *resource
+		row  exportRow
+		want bool
+	}{
+		{ratings, pageRows[2], true},
+		{ratings, pageRows[1], false},
+		{list, pageRows[1], true},
+		{list, pageRows[0], false},
+		{list, exportRow{Type: "RATINGS", ListID: "ls4154799008"}, false},
+		{watchlist, pageRows[0], true},
+		{watchlist, pageRows[2], false},
+	}
+	for _, tt := range tests {
+		if got := tt.r.exportOf(tt.row); got != tt.want {
+			t.Errorf("%s exportOf %+v: got %v, want %v", tt.r, tt.row, got, tt.want)
+		}
+	}
 }
 
 func TestResourceMatches(t *testing.T) {
@@ -44,24 +74,39 @@ func TestResourceMatches(t *testing.T) {
 }
 
 func TestStateOf(t *testing.T) {
-	ratings := &resource{kind: "ratings", before: 2}
-	if state, _ := stateOf(pageRows, ratings); state != exportNotListed {
-		t.Errorf("no new row yet: got state %d", state)
+	ratings := &resource{kind: "ratings"}
+	list := &resource{kind: "list", id: "ls4154799008"}
+
+	// The page looks the same before and after a run that exports the same resources, so only the start times tell
+	// the new exports apart.
+	run3 := run2.Add(12 * time.Hour)
+	if state, row := stateOf(pageRows, ratings, run3); state != exportNotListed || row.Index != 2 {
+		t.Errorf("no new export yet: got state %d row %+v", state, row)
 	}
 
-	fresh := append([]exportRow{{Href: "/user/ur1/ratings/", Processing: true}}, pageRows...)
-	if state, _ := stateOf(fresh, ratings); state != exportProcessing {
-		t.Errorf("new row processing: got state %d", state)
+	fresh := append([]exportRow{{Index: 0, Type: "RATINGS", Status: "PROCESSING", StartedOn: run3.Add(time.Minute)}}, pageRows...)
+	if state, _ := stateOf(fresh, ratings, run3); state != exportProcessing {
+		t.Errorf("new export processing: got state %d", state)
 	}
 
-	fresh[0] = exportRow{Index: 0, Href: "/user/ur1/ratings/", Ready: true}
-	if state, row := stateOf(fresh, ratings); state != exportReady || row.Index != 0 {
-		t.Errorf("new row ready: got state %d row %+v", state, row)
+	fresh[0].Status = "READY"
+	if state, row := stateOf(fresh, ratings, run3); state != exportReady || row.Index != 0 {
+		t.Errorf("new export ready: got state %d row %+v", state, row)
 	}
 
-	list := &resource{kind: "list", id: "ls4154799008", before: 1}
-	if state, row := stateOf(pageRows, list); state != exportReady || row.Index != 1 {
+	if state, row := stateOf(pageRows, list, run2); state != exportReady || row.Index != 1 {
 		t.Errorf("list: got state %d row %+v", state, row)
+	}
+
+	// The newest export wins even when the rows are out of order.
+	reversed := slices.Clone(pageRows)
+	slices.Reverse(reversed)
+	if state, row := stateOf(reversed, list, run2); state != exportReady || row.Index != 1 {
+		t.Errorf("reversed: got state %d row %+v", state, row)
+	}
+
+	if state, row := stateOf(nil, list, run2); state != exportNotListed || row.ready() {
+		t.Errorf("no exports: got state %d row %+v", state, row)
 	}
 }
 
