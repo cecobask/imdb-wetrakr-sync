@@ -152,3 +152,39 @@ func TestParseExportsPage(t *testing.T) {
 		t.Error("broken page: no error")
 	}
 }
+
+func TestLoadDoesNotWaitForStalledResources(t *testing.T) {
+	release := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><body><div id="content"></div><img src="/stalled.png"></body></html>`))
+	})
+	// An ad or tracker that never answers holds back the load event of the page.
+	mux.HandleFunc("/stalled.png", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	defer close(release)
+
+	s, ctx := newTestSession(t)
+	for name, load := range map[string]func() error{
+		"navigate": func() error { return s.navigate(ctx, srv.URL) },
+		"reload":   func() error { return s.reload(ctx) },
+	} {
+		started := time.Now()
+		if err := load(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if took := time.Since(started); took > loadGrace+5*time.Second {
+			t.Errorf("%s took %s", name, took)
+		}
+		if ok, err := s.exists(ctx, "#content"); err != nil || !ok {
+			t.Errorf("%s: content not loaded: %v %v", name, ok, err)
+		}
+	}
+}

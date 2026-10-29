@@ -15,7 +15,15 @@ import (
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
+)
+
+const (
+	// documentTimeout bounds the wait for the document of a page to load and be parsed.
+	documentTimeout = time.Minute
+	// loadGrace bounds the wait for the load event of a page once its document is parsed.
+	loadGrace = 15 * time.Second
 )
 
 // browserSession is a headless Chrome tab with the helpers the IMDb client needs.
@@ -128,15 +136,75 @@ func (s *browserSession) with(ctx context.Context) (context.Context, context.Can
 }
 
 func (s *browserSession) navigate(ctx context.Context, url string) error {
-	c, cancel := s.with(ctx)
-	defer cancel()
-	return chromedp.Do(c, chromedp.Navigate(url))
+	return s.load(ctx, func(c context.Context) error {
+		res, err := chromedp.Call(c, page.Navigate, page.NavigateParams{URL: url})
+		if err == nil && res.ErrorText != "" {
+			err = errors.New(res.ErrorText)
+		}
+		return err
+	})
 }
 
 func (s *browserSession) reload(ctx context.Context) error {
+	return s.load(ctx, func(c context.Context) error {
+		_, err := chromedp.Call(c, page.Reload, page.ReloadParams{})
+		return err
+	})
+}
+
+// load runs the navigation and waits for the new document of the main frame to be parsed, then for its load event,
+// but only for loadGrace. chromedp's Navigate and Reload wait for the load event without a limit, and an ad or tracker
+// on IMDb that stalls holds it back for minutes. The callers wait for the elements they need anyway.
+func (s *browserSession) load(ctx context.Context, navigate func(context.Context) error) error {
 	c, cancel := s.with(ctx)
 	defer cancel()
-	return chromedp.Do(c, chromedp.Reload())
+	tree, err := chromedp.Call(c, page.GetFrameTree, cdp.Empty{})
+	if err != nil {
+		return err
+	}
+	frameID := tree.FrameTree.Frame.ID
+	// Subscribe before navigating, so no event is lost. The timer ends the wait by ending the subscription.
+	ec, stop := context.WithCancel(c)
+	defer stop()
+	timer := time.AfterFunc(documentTimeout, stop)
+	defer timer.Stop()
+	events := chromedp.Events(ec, page.LifecycleEvent)
+	if err := navigate(c); err != nil {
+		return err
+	}
+	// The lifecycle of the new document starts with init, and its events carry its loader id, which tells them apart
+	// from late events of the previous document.
+	var loaderID cdp.LoaderID
+	parsed := false
+	for ev, err := range events {
+		if err != nil {
+			if ec.Err() == nil {
+				return err
+			}
+			break
+		}
+		if ev.FrameID != frameID {
+			continue
+		}
+		switch {
+		case ev.Name == "init":
+			loaderID = ev.LoaderID
+		case ev.LoaderID != loaderID || loaderID == "":
+		case ev.Name == "DOMContentLoaded":
+			parsed = true
+			timer.Reset(loadGrace)
+		case ev.Name == "load":
+			return nil
+		}
+	}
+	switch {
+	case c.Err() != nil:
+		return c.Err()
+	case !parsed:
+		return fmt.Errorf("the page did not load in %s", documentTimeout)
+	}
+	s.logger.Debug("the page is still loading, continuing without waiting for it", "waited", loadGrace)
+	return nil
 }
 
 // eval runs a JavaScript expression and decodes its JSON result into T.
